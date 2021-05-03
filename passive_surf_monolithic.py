@@ -1,47 +1,9 @@
 import numpy as np
 import timeit
 import matplotlib.pyplot as plt
+import plotext as tplt
 from dolfin import *
 from mshr import *
-
-def autoTimestep(no_iterations, dt_prev, dt_min = 1e-7, dt_max = 0.5, min_iter = 3, dt_dt = 2, increment = 2):
-
-    # Check if 
-    if no_iterations < min_iter:
-        # Increase timestep if possible
-        dt = min(increment*dt_prev, dt_max)
-
-    elif no_iterations > min_iter + dt_dt:
-        # reduce timestep if necessary
-        dt = max(dt_min, (1/increment)*dt_prev)
-
-    else:
-        # Keep the timestep - Passing equal dtMin==dtMax, auto-timestep is turned off.
-        dt = dt_prev
-    
-    return dt
-
-def _mesh(L, H, Nx, Ny):
-    '''
-    Returns a mesh refined near top boundary according to the reference below.
-    Reference: Mortensen and Valen-Sendstad (2016), arXiv:1602.03643v1
-    '''
-    # Define scale
-    scale = min(L, H)
-    channel = Rectangle(Point(0,0), Point(L, H))
-    m = generate_mesh(channel, Nx)
-    # Create rectangle mesh
-    # m = RectangleMesh(Point(0, 0), Point(L, H), Nx, Ny)
-    # Get coordinates
-    x = m.coordinates()
-    # refine near boundary
-    x[:,1] = np.arctan(np.pi*(x[:, 1])) / np.arctan(np.pi)
-
-    # downscale coordinate
-    # x[:,0] = x[:,0]*scale
-    # x[:,1] = x[:,1]*scale  
-
-    return m
 
 def mesh_polygon(H, L, l_extra, N_surface, N_domain, amplitude):
     '''
@@ -78,15 +40,6 @@ def mesh_polygon(H, L, l_extra, N_surface, N_domain, amplitude):
     mesh = generate_mesh(domain,int(N_domain))
 
     return mesh
-
-def shift_mesh(mesh, L):
-    '''
-    Shifts mesh to the left
-    '''
-    x = mesh.coordinates()
-    x[:,0] =  x[:,0] - L/2
-
-    mesh.bounding_box_tree().build(mesh)
 
 def center_mesh(mesh):
     '''
@@ -159,64 +112,99 @@ def surface_displacement(D, u, n, n_surf, dt, bmf, domain_bmf, surface_marker, b
 
     return displacement
 
-def gaussian_pulse_surface(D, mesh, boundary_mesh, boundary_markers, surface_marker, ls, sigma = .2, amplitude= - 0.05):
+def get_height(mesh, x0, which_side=0):
+    '''
+    Return y-coordinate with highest value given x = x0.
+    which_side = 0 -> any given location
+    which_side = 1 -> returns max height for outermost right x value
+    which_side = -1 -> returns max height for outermost left x value
+    '''
+    # x0 = 0.0 # Constriction x coordinate
+    # Get mesh coordinates
+    x = mesh.coordinates()
 
-    initial_deform = Function(D)
-    ampl = amplitude
-    sigma_ = sigma
-    mu_ = L/2
-    L1 = ls
-    L2 = L1 + 2*np.pi
-    ymax = 0
-    ymin = -0.1 # initial thicknes - Ida and Miksis (1996)
-    sin_shape = Expression(("0", "(ymax - ymin)*cos(x[0])+ ymin"), ymax = ymax, ymin = ymin, degree=2)
-    # cos_shape = Expression(("0", "1 - *cos(pi*x[0])"), L=L, degree=2)
-
-    # pulse = Expression(("0", "ampl*(1/(sigma*sqrt(2*pi)))*exp(-((x[0]-mu)*(x[0]-mu))/(2*sigma*sigma))"), ampl=ampl, mu = mu_, sigma = sigma_, degree=2)
+    if which_side == 1: # x coordinate of right boundary
+        x0 = max(x[:,0])
     
-    pulse = Expression(("0", "x[0] > L1 ? x[0] < L2 ? (ymax - ymin)*cos(x[0]-L1)+ ymin: ymax: ymax"), ymax = ymax, ymin = ymin, L1 = L1, L2 = L2, degree=2)
-   
+    if which_side == -1: # x coordinate of left boundary
+        x0 = min(x[:,0])
 
-    # x[0] >= L1 ? x[0] <= L2 ? (ymax - ymin)*cos(x[0])+ ymin: ymax: ymax 
-    # x[0]-x[1]-t >= 0 ? -2*(exp(x[0]-x[1]-t)-1)/(exp(x[0]-x[1]-t)-1): -(x[0]-x[1]-t)'
-
-
-
-    bc = DirichletBC(D, pulse, boundary_markers, surface_marker)
-    bc.apply(initial_deform.vector())
-
-    ALE.move(boundary_mesh, initial_deform)
-    ALE.move(mesh, boundary_mesh)
-
-    mesh.bounding_box_tree().build(mesh)
-
-def sin_surface(D, mesh, boundary_mesh, boundary_markers, surface_marker, ampl=0.1):
+    # Get indices that match coordinate such as x(mesh) = x0 from mesh.coordinates()
+    indices = [idx for idx, value in enumerate(x) if np.isclose(value[0], x0, atol=1.e-8)]
+    ymax = 0 # initialize counter for y value
+    idx = 0 # initialize counter for index
+    for index in indices: # get index of value with max y value
+        
+        if x[index][1] >= ymax:
+            ymax = x[index][1]
+            idx = index
     
-    initial_deform = Function(D)
-    sin_shape = Expression(("0", "ampl*sin(x[0]*0.32*pi + pi/2) - ampl"), ampl=ampl, degree=2)
+    return x[idx][1]
 
-    bc = DirichletBC(D, sin_shape, boundary_markers, surface_marker)
-    bc.apply(initial_deform.vector())
+def save_results(u_, p_, displacement, mesh, boundary_mesh, L, H, L_problem, scale, rho_, mu_, nu, t, dt):
 
-    ALE.move(boundary_mesh, initial_deform)
-    ALE.move(mesh, boundary_mesh)
+    tau_ = t/(pow(L_problem, 2)/nu) # dimensionless time    
 
-    mesh.bounding_box_tree().build(mesh)
-
-def sin_surface1(D, mesh, boundary_mesh, boundary_markers, surface_marker, ampl=0.1):
+    # dimensionless mesh and boundary mesh
+    dim_mesh = dimensionless_mesh(mesh, L, H, scale)
+    dim_bmesh = dimensionless_mesh(boundary_mesh, L, H, scale)
     
-    initial_deform = Function(D)
-    ymax = 0
-    ymin = -0.1 # initial thicknes - Ida and Miksis (1996)
-    sin_shape = Expression(("0", "(ymax - ymin)*cos(x[0] -2)+ ymin"), ymax = ymax, ymin = ymin, degree=2)
+    # dimensionless velocity and pressure
+    # u_dim = u_ / (mu_/(rho_*L*scale))
 
-    bc = DirichletBC(D, sin_shape, boundary_markers, surface_marker)
-    bc.apply(initial_deform.vector())
 
-    ALE.move(boundary_mesh, initial_deform)
-    ALE.move(mesh, boundary_mesh)
+    print("------------ Saving pvd files --------------")
+    print("Dimensional: t = {}     dt = {}".format(t, dt))
+    print("Dimensionless t = {}".format(tau_))
 
-    mesh.bounding_box_tree().build(mesh)
+    # Rename variables
+    u_.rename("u", "Velocity Field")
+    p_.rename("p", "Pressure Field")
+    displacement.rename("displacement", "Displacement")
+
+    # Save dimensional variables
+    m_pvd << (mesh, t)
+    u_pvd << (u_, t)
+    p_pvd << (p_, t)
+    displacement_pvd << (displacement, t)
+
+    # Save dimensionless variables
+    m_dim_pvd << (dim_mesh, tau_)
+    # u_dim_pvd << (u_dim, tau_)
+    b_m_dim_pvd << (dim_bmesh, tau_)
+
+def sim_log(path, sim_attempt, H, L, l_extra, scale, L_problem, amplitude, N_surface, N_domain, sigma_, A_, mu_, rho_, g, THICKNESS_CRITERION):
+
+    # Create dictionary
+    d = {
+        "Case ": sim_attempt,
+        "Path ": path,
+        "Mean thickness [m]": H,
+        "Scale of the problem [m]": scale,
+        "Characteristic length [m]": L_problem,
+        "Auxiliar length ": l_extra,
+        "Initial perturbation amplitude ": amplitude,
+        "Initial thickness [m] ": (H-amplitude)*scale,
+        "N_surface ": N_surface,
+        "N_domain ": N_domain,
+        "Simulation minimum thickness (end criterion) ": THICKNESS_CRITERION,
+        "Interface tension [N/m] ": sigma_,
+        "Hamaker constant [J] ": A_,
+        "Dynamic viscosity [Pa.s] ": mu_,
+        "Density [Kg/m³] ": rho_,
+        "Gravity [m/s²] ": g,
+    }
+    # print values
+    print('\n')
+    string = " ============ Simulation setup =========== \n"
+
+    for key, value in d.items():
+        print('{0} = {1}'.format(key, value))
+        string += key +': '+ str(value) + '\n'
+        
+    print('\n')
+    
+    return string
 
 def divK(nN):
     # div(n)
@@ -281,16 +269,13 @@ def normal_dofs(mesh, n):
 def solve_NS_monolithic(mesh, bmf, surface_marker, left_marker, right_marker, bottom_marker, w0, k, mu, rho, sigma, A, f, scale):
     
     # Solver Parameters
-    absTol = 1e-9          # absolute tolerance: residual value
-    relTol = 1e-10          # relative tolerance: change with respect to previous
+    absTol = 1e-13          # absolute tolerance: residual value
+    relTol = 1e-16          # relative tolerance: change with respect to previous
     maxIter =   20         # Maximum iterations for non-linear solver
     nlinSolver = 'newton'   # Non-Linear Solver(Coupled Pressure/Velocity)
     linSolver = 'mumps'     # Linear Solver(Concentration)
     alpha = 0.9             # relaxation
 
-    # metadata = {"quadrature_degree": 3, "quadrature_scheme": "default"}
-    # dx = Measure('dx', domain=mesh, metadata = metadata)
-    # ds = Measure('ds', domain=mesh, subdomain_data = bmf, metadata = metadata)
     dx = Measure('dx', domain=mesh)
     ds = Measure('ds', domain=mesh, subdomain_data = bmf)
 
@@ -305,8 +290,6 @@ def solve_NS_monolithic(mesh, bmf, surface_marker, left_marker, right_marker, bo
 
     Uel = VectorElement('Lagrange', mesh.ufl_cell(), 2)
     Pel = FiniteElement('Lagrange', mesh.ufl_cell(), 1)
-    # Uel = VectorElement('Quadrature', mesh.ufl_cell(), degree = 2, quad_scheme = 'default')
-    # Pel = FiniteElement('Quadrature', mesh.ufl_cell(), degree = 1, quad_scheme = 'default')
 
     UPel = MixedElement([Uel,Pel])
    
@@ -331,7 +314,7 @@ def solve_NS_monolithic(mesh, bmf, surface_marker, left_marker, right_marker, bo
                                                 (1-alpha)*(rho*dot(dot(u0,grad(u0)),v) + inner(TT(u0,p0,mu, I),DD(v)))*dx()  # Relaxation
 
             # Inlet Pressure                                    # Outlet Pressure                                      # Gravity
-    L1 = - (VdW_sides(A, coords))*dot(n,v)*ds(left_marker) - (VdW_sides(A, coords))*dot(n,v)*ds(right_marker) # + inner(rho*g,v)*dx()
+    L1 = - (VdW_sides(A, mesh, side = -1))*dot(n,v)*ds(left_marker) - (VdW_sides(A, mesh, side = 1))*dot(n,v)*ds(right_marker) # + inner(rho*g,v)*dx()
     # L1 = - (P_)*dot(n,v)*ds(right_marker) # + inner(rho*g,v)*dx()
 
     # Boundary integral term 
@@ -444,14 +427,20 @@ def VdW(A, x):
     '''
     return A/(2*np.pi*pow(x[1],3))
 
-def VdW_sides(A, x):
+def VdW_sides(A, mesh, side):
     '''
     Van der Waals forces on surface
     A = Hamacker constant for the fluid
+    
+    side = 1 -> right boundary
+    side = -1 -> left boundary
     '''
     
+    y_side = get_height(mesh, x0 = 0.0, which_side=side)
+    
 
-    return A/(2*np.pi*pow(max(x[:,1]),3))
+    return A/(2*np.pi*pow(y_side,3))
+    # return A/(2*np.pi*pow(max(mesh.coordinates()[:,1]),3))
 
 # ------------------------------------------------------------------------------#
 
@@ -466,12 +455,6 @@ The validation cases are Ida and Miksis (1994), Bazzi and Carvalho (2019), as:
     S = (sigma*rho*H) / (3*mu²)
     A = (Ã*rho*Lc²) / (6*pi*H³*mu²)
 
-
-'''
-# =============================================================================================
-sim_attempt = "mesh_test_8/" 
-save_index = 8
-'''
 Mesh test:
 0 -> N_surf = 50   N = 50
 1 -> N_surf = 100   N = 80
@@ -483,30 +466,64 @@ Mesh test:
 7 -> N_surf = 250   N = 250
 8 -> N_surf = 300   N = 250
 9 -> N_surf = 300   N = 300
+
 '''
+# =============================================================================================
+# local_path = "/media/heitorvc/Simulations/Mestrado/results/passive_surface/"
+local_path = "/mnt/d/dissertation/passive_surface_results/"
 
+sim_attempt = "ida_miksis_setup_update_vdw_bc_Laux_2/" 
+save_index = 3
 
-
-sigma_ = 0.030396 # Interfacial tension
-A_ = 4.77e-14 # Hamaker constant 
-Courant = 800 # Fixed Courant to speed up simulation (counting on convergence with more iterations)
-
-# Domain parameters
-H = .5 # Initial height
+# ========== Domain parameters ==============
+H = .5 # Initial heights
 L = 2*np.pi # Initial Length
 l_extra = 2 # Extra length
 amplitude = 0.1 # Initial perturbation amplitude
-N_surface = 300 # Surface discretization points
-N_domain = 250 # Mesh resolution / number of points on the surface
+N_surface = 200 # Surface discretization points
+N_domain = 300 # Mesh resolution / number of points on the surface
+
+# ========== Interface parameters ==============
+sigma_ = 3.08e-5 # Interfacial tension
+A_ = 4.77e-16# Hamaker constant 
+Courant = 500 # Fixed Courant to speed up simulation (counting on convergence with more iterations)
+
+# ========== Bulk parameters ==============
+mu_ = 0.001 # kinematic viscosity
+rho_ = 1000 # Density
+nu = mu_/rho_
+
+g = 0 # Gravity
+mu  = Constant(mu_) # kinematic viscosity
+rho = Constant(rho_) # Density
+sigma = Constant(sigma_) # Surface tension
+f   = rho*Constant((0, - g)) # Body force
 
 # Scale parameters
-scale = 1e-6 # problem scale
+scale = 1e-6 # problem scale // Mean thickness for Erneux and Davis
+
+'''
+Erneux and Davis (1993) states that the characteristic length for the dimensionless time 
+equals the mean thickness, whereas Ida and Miksis (1994) uses the perturbation wavelength
+to obtain the dimensionless time.
+'''
 L_problem = L*scale # Initial perturbation characteristic length
 
+# final thin sheet thickness to end simulation
+THICKNESS_CRITERION = 0.05*scale 
+
 # Saving parameters
-dt_save = 50 # Save results after dt_save number of iterations
+dt_save = 20 # Save results after dt_save number of iterations
 MaxSave = 10000 # Max number of saved data
 
+# Save log
+string = sim_log(local_path, sim_attempt, H, L, l_extra, scale, L_problem,
+        amplitude, N_surface, N_domain,
+        sigma_, A_, mu_, rho_, g,
+        THICKNESS_CRITERION)
+
+# with open(local_path+sim_attempt+"log.txt","w+") as file:
+#     file.write(string)
 ## =============================================================================================
 ## Create polygon mesh
 mesh = mesh_polygon(H, L, l_extra, N_surface, N_domain, amplitude)
@@ -549,20 +566,6 @@ boundary_mesh.bounding_box_tree().build(boundary_mesh)
 # Create function space for the displacement
 D= VectorFunctionSpace(boundary_mesh, "CG", 1)
 
-# Bulk parameters
-mu_ = 0.01 # kinematic viscosity
-rho_ = 1000 # Density
-nu = mu_/rho_
-
-g = 0 # Gravity
-
-mu  = Constant(mu_) # kinematic viscosity
-rho = Constant(rho_) # Density
-sigma = Constant(sigma_) # Surface tension
-f   = rho*Constant((0, - g)) # Body force
-
-local_path = "/media/heitorvc/Simulations/Mestrado/results/passive_surface/"
-
 # Saving files
 u_pvd = File(local_path + sim_attempt +"u_"+str(save_index)+".pvd")
 p_pvd = File(local_path + sim_attempt +"p_"+str(save_index)+".pvd")
@@ -579,12 +582,14 @@ UPel = MixedElement([Uel,Pel])
 W = FunctionSpace(mesh, UPel)
 w_n = Function(W)
 
-
 Time = 1e-2 # Total time
 t = 0 # initial time
-dt = 5e-8 # initial dt
+dt = 5e-9 # initial dt
 
 save = 0 # Dummy counter to save results
+
+# Store constriction thickness evolution
+thickness = []
 
 # Time execution time
 start = timeit.default_timer()
@@ -597,70 +602,68 @@ while t <= Time and dt > 0.0 and save < MaxSave:
     print("dt = ", dt)
     print("Iterations: ", save)
     
+    # ================ Solve system  ============================================== #
+    k = Constant(dt) # Time-step
 
-    k = Constant(dt)
-    w_, no_iterations, converged, kappa, n_surf, n = solve_NS_monolithic(mesh, bmf, surface_marker, left_marker, right_marker, bottom_marker, w_n, k, mu, rho, sigma, A_, f, scale)
+    # Solve system 
+    w_, no_iterations, converged, kappa, n_surf, n = solve_NS_monolithic(mesh, bmf, 
+                                                                        surface_marker, left_marker, right_marker, bottom_marker, 
+                                                                        w_n, k, mu, rho, sigma, A_, f, scale)
 
-    (u_, p_) = w_.leaf_node().split()
+    (u_, p_) = w_.leaf_node().split() # split variables
 
-    if not converged:
-        # print("Breakpoint")
-        break
- 
-    displacement = surface_displacement(D, u_, n, n_surf, dt, boundary_markers, bmf, surface_marker, bottom_marker, right_marker, left_marker)
+    # Calculate displacement vector
+    displacement = surface_displacement(D, u_, n, n_surf, dt, boundary_markers, bmf, 
+                                        surface_marker, bottom_marker, right_marker, left_marker)
     
-    ALE.move(boundary_mesh, displacement)
-    ALE.move(mesh, boundary_mesh)
+    # ================ Check Simulation status =================================== #
 
-    # ALE.move(mesh, displacement)
-    mesh.bounding_box_tree().build(mesh)
+    h_ = get_height(mesh, x0 = 0.0, which_side=0) # Get constriction thickness
 
-    # Fix Courant number in 1000 
-    dt = (Courant*mesh.hmin())/u_.vector().max()
+    # Print values
+    print("\n")
+    print("thin sheet thickness: {}".format(h_))
+    print("\n")
 
-    w_n.assign(w_)
+    # Simulation end criterion
+    if not converged or h_ < THICKNESS_CRITERION: 
+        # Save last time step
+        save_results(u_, p_, displacement,
+                     mesh, boundary_mesh, 
+                     L, H, L_problem, scale, 
+                     rho_, mu_, nu, t, dt)  
+        break
 
-    # Saving results
-
+    # ================ Save results =================================== #
     if save % dt_save == 0:
 
-        # Dimensionless time: h0 = 2*scale (remember the symmetry condition)
-        tau_ = t/(pow(L_problem, 2)/nu)
+        # Save thickness profile
+        thickness.append([t, h_])
 
-        # dimensionless mesh
-        dim_mesh = dimensionless_mesh(mesh, L, H, scale)
-        dim_bmesh = dimensionless_mesh(boundary_mesh, L, H, scale)
+        # Save pvd files     
+        save_results(u_, p_, displacement,
+                     mesh, boundary_mesh, 
+                     L, H, L_problem, scale, 
+                     rho_, mu_, nu, t, dt)    
 
-        # Dimensionless velocity
-        # W_Dimensionless = FunctionSpace(dim_mesh, UPel)
-        u_dim = u_ / (mu_/(rho_*L*scale))
-        print("------------ Saving results --------------")
-        # print("Dimensional h(x=0) = ", h_rupture)
-        print("Dimensional time t = ", t)
-        print("dt = ", dt)
-        print("\n")
-        # print("Dimensionless h(x=0) = ", h_rupture/scale)
-        print("Dimensionless time tau = ", tau_)
-        print("------------------------------------------")
-            # t_sav = t + dt_save
-
-        u_.rename("u", "Velocity Field")
-        p_.rename("p", "Pressure Field")
-        displacement.rename("displacement", "Displacement")
-        
-        m_pvd << (mesh, t)
-        u_pvd << (u_, t)
-        p_pvd << (p_, t)
-        displacement_pvd << (displacement, t)
-
-        m_dim_pvd << (dim_mesh, tau_)
-        # u_dim_pvd << (u_dim, tau_)
-        b_m_dim_pvd << (dim_bmesh, tau_)
-
-    t += dt
+    # ================ Update surface position ===================================#
     
-    save += 1
+    ALE.move(boundary_mesh, displacement) # Move boundary mesh
+    ALE.move(mesh, boundary_mesh) # Move mesh
 
+    mesh.bounding_box_tree().build(mesh) # Update mesh bounding box for next iteration
+
+    # ================ Assign values for next iteration ===================================#
+    
+    dt = (Courant*mesh.hmin())/u_.vector().max() # Update time step: Fixed Courant number to control time resolution near rupture
+    w_n.assign(w_) # Assign state variables for next iteration
+
+    t += dt # update time    
+    save += 1 # update save counter
+
+# ================ Simulation ended ===================================#
+print("-- Saving thickness evolution timeseries --")
+np.save(local_path + sim_attempt + "thickness.npy", np.asarray(thickness))
 
 stop = timeit.default_timer()
 total_time = stop - start
